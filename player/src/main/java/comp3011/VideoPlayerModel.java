@@ -102,6 +102,8 @@ public class VideoPlayerModel {
 
     private boolean audioOutputEnabled;
 
+    private boolean subtitleOutputEnabled;
+
     private boolean audioAvailable;
 
     private boolean frameProcessorsInitialised;
@@ -151,6 +153,7 @@ public class VideoPlayerModel {
             Consumer<Boolean> audioOutputStateChangedHandler) {
 
         audioOutputEnabled = audioEnabled;
+        subtitleOutputEnabled = frameProcessorOptions.contains(FrameProcessorOption.SUBTITLE);
 
         this.videoSizeChangedHandler =
                 videoSizeChangedHandler;
@@ -251,6 +254,14 @@ public class VideoPlayerModel {
         }
 
         notifyPlaybackStateChanged();
+    }
+
+    public boolean isSubtitleEnabled() {
+        return subtitleOutputEnabled;
+    }
+
+    public void toggleSubtitles() {
+        subtitleOutputEnabled = !subtitleOutputEnabled;
     }
 
     public void toggleAudioOutput() {
