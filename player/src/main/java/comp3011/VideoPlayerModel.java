@@ -104,6 +104,8 @@ public class VideoPlayerModel {
 
     private boolean subtitleOutputEnabled;
 
+    private final SubtitleState subtitleState = new SubtitleState();
+
     private boolean audioAvailable;
 
     private boolean frameProcessorsInitialised;
@@ -154,6 +156,7 @@ public class VideoPlayerModel {
 
         audioOutputEnabled = audioEnabled;
         subtitleOutputEnabled = frameProcessorOptions.contains(FrameProcessorOption.SUBTITLE);
+        subtitleState.setEnabled(subtitleOutputEnabled);
 
         this.videoSizeChangedHandler =
                 videoSizeChangedHandler;
@@ -171,14 +174,25 @@ public class VideoPlayerModel {
                 audioOutputStateChangedHandler;
 
         this.frameProcessors =
-                new ArrayList<>(
-                        frameProcessorOptions.size());
+                new ArrayList<>(frameProcessorOptions.size() + 1);
 
-        for (FrameProcessorOption option
-                : frameProcessorOptions) {
-
+        for (FrameProcessorOption option : frameProcessorOptions) {
+            /*
+             * All subtitle stages share the same thread-safe state.
+             * Other effects retain their Assignment 2 construction.
+             */
             this.frameProcessors.add(
-                    option.createProcessor());
+                    option == FrameProcessorOption.SUBTITLE
+                            ? new FrameSubtitler(subtitleState)
+                            : option.createProcessor());
+        }
+
+        /*
+         * The CC button must also work when -S was not supplied.
+         * In that case, add a disabled subtitle stage at the end.
+         */
+        if (!frameProcessorOptions.contains(FrameProcessorOption.SUBTITLE)) {
+            this.frameProcessors.add(new FrameSubtitler(subtitleState));
         }
     }
 
@@ -262,6 +276,7 @@ public class VideoPlayerModel {
 
     public void toggleSubtitles() {
         subtitleOutputEnabled = !subtitleOutputEnabled;
+        subtitleState.setEnabled(subtitleOutputEnabled);
     }
 
     public void toggleAudioOutput() {
