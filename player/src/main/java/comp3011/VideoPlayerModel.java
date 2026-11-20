@@ -106,6 +106,8 @@ public class VideoPlayerModel {
 
     private final SubtitleState subtitleState = new SubtitleState();
 
+    private final SubtitleCoordinator subtitleCoordinator = new SubtitleCoordinator();
+
     private boolean audioAvailable;
 
     private boolean frameProcessorsInitialised;
@@ -198,7 +200,12 @@ public class VideoPlayerModel {
 
     public void play(File file) {
 
+        subtitleCoordinator.cancel();
+        subtitleState.setCues(List.of());
         videoFile = file;
+        if (subtitleOutputEnabled) {
+            subtitleCoordinator.startIfNeeded(file, subtitleState);
+        }
 
         videoDurationUs =
                 NO_SEEK_REQUEST;
@@ -277,6 +284,9 @@ public class VideoPlayerModel {
     public void toggleSubtitles() {
         subtitleOutputEnabled = !subtitleOutputEnabled;
         subtitleState.setEnabled(subtitleOutputEnabled);
+        if (subtitleOutputEnabled && videoFile != null) {
+            subtitleCoordinator.startIfNeeded(videoFile, subtitleState);
+        }
     }
 
     public void toggleAudioOutput() {
@@ -298,6 +308,8 @@ public class VideoPlayerModel {
 
     public void stopPlayback() {
 
+        subtitleCoordinator.cancel();
+        subtitleState.setCues(List.of());
         closePlaybackResources();
 
         currentTimestampUs = 0;
@@ -314,6 +326,7 @@ public class VideoPlayerModel {
 
     public void shutdown() {
 
+        subtitleCoordinator.close();
         closePlaybackResources();
     }
 
