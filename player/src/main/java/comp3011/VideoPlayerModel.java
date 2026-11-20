@@ -114,6 +114,16 @@ public class VideoPlayerModel {
 
     private boolean endOfInput;
 
+    // Step 11: enabled only with -Dcomp3011.playback.diagnostics=true.
+    // No additional work occurs on normal TITAN / player runs.
+    private static final boolean PLAYBACK_DIAGNOSTICS =
+            Boolean.getBoolean("comp3011.playback.diagnostics");
+    private long diagnosticStartNs;
+    private long diagnosticLastReportNs;
+    private int diagnosticShownFrames;
+    private int diagnosticLastFrameNumber = -1;
+    private long diagnosticLastMediaTimestampUs = -1;
+
     /*
      * These two flags preserve the starter player's behaviour where seeking
      * while paused still updates the image displayed on screen.
@@ -515,6 +525,19 @@ public class VideoPlayerModel {
     private void resetPlaybackClock(
             long logicalTimestampUs) {
 
+        if (PLAYBACK_DIAGNOSTICS) {
+            diagnosticStartNs = System.nanoTime();
+            diagnosticLastReportNs = diagnosticStartNs;
+            diagnosticShownFrames = 0;
+            diagnosticLastFrameNumber = -1;
+            diagnosticLastMediaTimestampUs = -1;
+            System.out.printf("[A3-PLAYBACK] START file=%s expected_frames=%d "
+                            + "fps=%.3f duration_ms=%d processors=%d seek_ms=%d%n",
+                    videoFile == null ? "(none)" : videoFile.getName(),
+                    totalVideoFrames, frameRate, videoDurationUs / 1000,
+                    frameProcessors.size(), logicalTimestampUs / 1000);
+        }
+
         pendingAudio.clear();
 
         preparedFrame = null;
@@ -610,6 +633,7 @@ public class VideoPlayerModel {
                 if (frame == null) {
 
                     endOfInput = true;
+                    reportPlaybackDiagnostics("EOF_DECODER");
                     return false;
                 }
 
@@ -879,6 +903,16 @@ public class VideoPlayerModel {
         currentTimestampUs =
                 frame.logicalTimestampUs();
 
+        if (PLAYBACK_DIAGNOSTICS) {
+            diagnosticShownFrames++;
+            diagnosticLastFrameNumber = frame.frameNumber();
+            diagnosticLastMediaTimestampUs = frame.mediaTimestampUs();
+            if (now - diagnosticLastReportNs >= 5_000_000_000L) {
+                diagnosticLastReportNs = now;
+                reportPlaybackDiagnostics("PROGRESS");
+            }
+        }
+
         relativeSeekBaseUs =
                 NO_SEEK_REQUEST;
 
@@ -909,6 +943,21 @@ public class VideoPlayerModel {
 
         notifyFrameReady(
                 frame.image());
+    }
+
+    /** Optional progress report, deliberately silent in normal operation. */
+    private void reportPlaybackDiagnostics(String event) {
+        if (!PLAYBACK_DIAGNOSTICS) {
+            return;
+        }
+        long wallMs = diagnosticStartNs == 0 ? 0
+                : (System.nanoTime() - diagnosticStartNs) / 1_000_000L;
+        System.out.printf("[A3-PLAYBACK] %s shown=%d last_frame=%d "
+                        + "expected_frames=%d last_media_ms=%d duration_ms=%d "
+                        + "wall_ms=%d eof=%b paused=%b%n",
+                event, diagnosticShownFrames, diagnosticLastFrameNumber,
+                totalVideoFrames, diagnosticLastMediaTimestampUs / 1000,
+                videoDurationUs / 1000, wallMs, endOfInput, pauseRequested);
     }
 
     private void queueAudio(
@@ -993,6 +1042,8 @@ public class VideoPlayerModel {
 
     private void finishPlayback() {
 
+        reportPlaybackDiagnostics("FINISHED");
+
         long endTimestampUs =
                 videoDurationUs
                         != NO_SEEK_REQUEST
@@ -1018,6 +1069,7 @@ public class VideoPlayerModel {
     private void handlePlaybackError(
             Exception e) {
 
+        reportPlaybackDiagnostics("ERROR");
         e.printStackTrace();
 
         closePlaybackResources();
