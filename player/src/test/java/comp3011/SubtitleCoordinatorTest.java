@@ -54,7 +54,9 @@ class SubtitleCoordinatorTest {
             URI endpoint = URI.create("http://127.0.0.1:"
                     + server.getAddress().getPort() + "/api/v1/subtitles");
             try (var coordinator = new SubtitleCoordinator(
-                    new AudioChunkExtractor(), new SubtitleHttpClient(endpoint))) {
+                    new AudioChunkExtractor(),
+                    new SubtitleHttpClient(endpoint),
+                    new SubtitleCache(temporary.resolve("cache")))) {
                 coordinator.startIfNeeded(audio.toFile(), state);
                 long deadline = System.nanoTime() + 10_000_000_000L;
                 while (state.textAt(300_000) == null && System.nanoTime() < deadline) {

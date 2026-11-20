@@ -11,19 +11,22 @@ import java.awt.font.GlyphVector;
 import java.awt.image.BufferedImage;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 import org.bytedeco.javacv.Frame;
 
 /**
- * Renders timed subtitles directly onto video frames.
+ * Draws timestamped subtitles into frame pixels after other pipeline effects.
  *
- * Uses an off-screen Java2D image as a text mask, then blends
- * only its subtitle region into the frame's pixel buffer.
+ * The A2 pipeline gives each processor instance to exactly one stage worker.
+ * Therefore the most recently rasterised subtitle can be cached here without
+ * locks. The independently mutable SubtitleState is published with volatiles.
  *
- * No JavaFX scene graph access occurs on worker threads.
+ * Rendering the glyphs and scanning their transparent pixels happens only when
+ * the active phrase or video dimensions change, not once for every video frame.
  *
- * Author: Raúl Ruiz Sánchez, a3229619
+ * Author: Raúl Ruiz Sánchez, a3229619.
  * Developed with assistance from ChatGPT.
  */
 public final class FrameSubtitler extends FrameProcessor {
@@ -33,229 +36,171 @@ public final class FrameSubtitler extends FrameProcessor {
 
     private final SubtitleState subtitleState;
 
+    // Only read/written by this processor's pipeline stage worker.
+    private RenderMask lastMask;
+    private int maskBuilds;
+
     public FrameSubtitler() {
         this(new SubtitleState());
     }
 
     public FrameSubtitler(SubtitleState subtitleState) {
-        this.subtitleState = subtitleState;
+        this.subtitleState = java.util.Objects.requireNonNull(subtitleState);
     }
 
     @Override
     public void process(Frame frame, InfoFrame info) {
-
-        String text = subtitleState.textAt(info.timestampUs());
-
-        if (text == null
-                || frame.image == null
-                || frame.image.length == 0
+        String phrase = subtitleState.textAt(info.timestampUs());
+        if (phrase == null || frame.image == null || frame.image.length == 0
                 || !(frame.image[0] instanceof ByteBuffer pixels)) {
             return;
         }
-
         if (frame.imageDepth != Frame.DEPTH_UBYTE
                 && frame.imageDepth != Frame.DEPTH_BYTE) {
             return;
         }
-
         int width = frame.imageWidth;
         int height = frame.imageHeight;
         int channels = frame.imageChannels;
-
-        if (width <= 0 || height <= 0 || channels <= 0) {
+        int stride = frame.imageStride;
+        if (width <= 0 || height <= 0 || channels <= 0 || stride <= 0) {
             return;
         }
 
-        List<String> lines = wrapText(text);
+        RenderMask mask = lastMask;
+        if (mask == null || !mask.matches(phrase, width, height, channels, stride)) {
+            mask = createMask(phrase, width, height, channels, stride);
+            lastMask = mask;
+            maskBuilds++;
+        }
 
+        // Only blend pixels actually covered by glyphs or black outline.
+        int coloredChannels = Math.min(channels, 3);
+        for (int i = 0; i < mask.offsets.length; i++) {
+            int offset = mask.offsets[i];
+            if (offset < 0 || offset > pixels.capacity() - coloredChannels) {
+                continue;
+            }
+            int argb = mask.argb[i];
+            int alpha = (argb >>> 24) & 0xff;
+            int foreground = (argb >>> 16) & 0xff;
+            for (int channel = 0; channel < coloredChannels; channel++) {
+                int old = pixels.get(offset + channel) & 0xff;
+                int mixed = (old * (255 - alpha) + foreground * alpha + 127) / 255;
+                pixels.put(offset + channel, (byte) mixed);
+            }
+        }
+    }
+
+    // Exposes a deterministic performance property to unit tests (not public API).
+    int maskBuildCount() {
+        return maskBuilds;
+    }
+
+    private static RenderMask createMask(
+            String phrase, int width, int height, int channels, int stride) {
+        List<String> lines = wrapText(phrase);
         if (lines.isEmpty()) {
-            return;
+            return new RenderMask(phrase, width, height, channels, stride,
+                    new int[0], new int[0]);
         }
 
-        int fontSize = Math.max(
-                12,
+        int fontSize = Math.max(12,
                 Math.min(38, Math.min(width / 38, height / 13)));
+        int regionHeight = Math.min(height, Math.max(48, fontSize * 4 + 16));
+        int regionTop = Math.max(0, height - regionHeight - 8);
 
-        int regionHeight = Math.min(
-                height,
-                Math.max(48, fontSize * 4 + 16));
-
-        int regionTop = Math.max(
-                0,
-                height - regionHeight - 8);
-
-        BufferedImage mask = new BufferedImage(
-                width,
-                regionHeight,
-                BufferedImage.TYPE_INT_ARGB);
-
-        Graphics2D graphics = mask.createGraphics();
-
+        BufferedImage image = new BufferedImage(
+                width, regionHeight, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g = image.createGraphics();
         try {
-            graphics.setRenderingHint(
-                    RenderingHints.KEY_ANTIALIASING,
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
                     RenderingHints.VALUE_ANTIALIAS_ON);
-
-            graphics.setRenderingHint(
-                    RenderingHints.KEY_TEXT_ANTIALIASING,
+            g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING,
                     RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
-
-            Font font = new Font(
-                    Font.SANS_SERIF,
-                    Font.BOLD,
-                    fontSize);
-
-            graphics.setFont(font);
-
-            FontMetrics metrics = graphics.getFontMetrics();
-
+            Font font = new Font(Font.SANS_SERIF, Font.BOLD, fontSize);
+            g.setFont(font);
+            FontMetrics metrics = g.getFontMetrics();
             int lineHeight = metrics.getHeight() + 2;
-
-            int baseline = regionHeight
-                    - 12
-                    - metrics.getDescent()
+            int baseline = regionHeight - 12 - metrics.getDescent()
                     - (lines.size() - 1) * lineHeight;
 
             for (String line : lines) {
-
-                int x = Math.max(
-                        0,
-                        (width - metrics.stringWidth(line)) / 2);
-
+                int x = Math.max(0, (width - metrics.stringWidth(line)) / 2);
                 GlyphVector glyphs = font.createGlyphVector(
-                        graphics.getFontRenderContext(),
-                        line);
-
+                        g.getFontRenderContext(), line);
                 Shape outline = glyphs.getOutline(x, baseline);
-
-                graphics.setColor(Color.BLACK);
-
-                graphics.setStroke(new BasicStroke(
+                g.setColor(Color.BLACK);
+                g.setStroke(new BasicStroke(
                         Math.max(2.5f, fontSize / 7.0f),
-                        BasicStroke.CAP_ROUND,
-                        BasicStroke.JOIN_ROUND));
-
-                graphics.draw(outline);
-
-                graphics.setColor(Color.WHITE);
-                graphics.fill(outline);
-
+                        BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+                g.draw(outline);
+                g.setColor(Color.WHITE);
+                g.fill(outline);
                 baseline += lineHeight;
             }
         } finally {
-            graphics.dispose();
+            g.dispose();
         }
 
-        blendMask(
-                pixels,
-                frame.imageStride,
-                channels,
-                width,
-                regionHeight,
-                regionTop,
-                mask);
+        int[] overlay = image.getRGB(0, 0, width, regionHeight,
+                null, 0, width);
+        int[] offsets = new int[overlay.length];
+        int[] pixels = new int[overlay.length];
+        int used = 0;
+        for (int y = 0; y < regionHeight; y++) {
+            for (int x = 0; x < width; x++) {
+                int color = overlay[y * width + x];
+                if ((color >>> 24) == 0) {
+                    continue;
+                }
+                offsets[used] = (regionTop + y) * stride + x * channels;
+                pixels[used] = color;
+                used++;
+            }
+        }
+        return new RenderMask(phrase, width, height, channels, stride,
+                Arrays.copyOf(offsets, used), Arrays.copyOf(pixels, used));
     }
 
     private static List<String> wrapText(String text) {
-
         List<String> lines = new ArrayList<>();
         StringBuilder current = new StringBuilder();
-
-        for (String word : text.strip().split("\\s+")) {
-
-            if (word.length() > MAX_CHARS) {
-                word = word.substring(0, MAX_CHARS);
-            }
-
-            int proposedLength = current.length()
-                    + (current.length() == 0 ? 0 : 1)
-                    + word.length();
-
-            if (proposedLength > MAX_CHARS) {
-
-                if (current.length() > 0) {
+        for (String originalWord : text.strip().split("\\s+")) {
+            String word = originalWord.length() > MAX_CHARS
+                    ? originalWord.substring(0, MAX_CHARS) : originalWord;
+            int length = current.length()
+                    + (current.isEmpty() ? 0 : 1) + word.length();
+            if (length > MAX_CHARS) {
+                if (!current.isEmpty()) {
                     lines.add(current.toString());
                 }
-
                 if (lines.size() >= MAX_LINES) {
                     return lines;
                 }
-
                 current = new StringBuilder(word);
-
             } else {
-
-                if (current.length() > 0) {
+                if (!current.isEmpty()) {
                     current.append(' ');
                 }
-
                 current.append(word);
             }
         }
-
-        if (current.length() > 0
-                && lines.size() < MAX_LINES) {
+        if (!current.isEmpty() && lines.size() < MAX_LINES) {
             lines.add(current.toString());
         }
-
         return lines;
     }
 
-    private static void blendMask(
-            ByteBuffer pixels,
-            int stride,
-            int channels,
-            int width,
-            int regionHeight,
-            int regionTop,
-            BufferedImage mask) {
-
-        int[] overlay = mask.getRGB(
-                0, 0, width, regionHeight,
-                null, 0, width);
-
-        int colorChannels = Math.min(channels, 3);
-
-        for (int y = 0; y < regionHeight; y++) {
-
-            for (int x = 0; x < width; x++) {
-
-                int argb = overlay[y * width + x];
-
-                int alpha = (argb >>> 24) & 0xff;
-
-                if (alpha == 0) {
-                    continue;
-                }
-
-                // Both outline and glyph are shades of grey.
-                // Their RGB channel order is therefore irrelevant.
-                int foreground = (argb >>> 16) & 0xff;
-
-                int offset = (regionTop + y) * stride
-                        + x * channels;
-
-                if (offset < 0
-                        || offset + colorChannels > pixels.capacity()) {
-                    continue;
-                }
-
-                for (int channel = 0;
-                        channel < colorChannels;
-                        channel++) {
-
-                    int original = pixels.get(offset + channel) & 0xff;
-
-                    int blended = (
-                            original * (255 - alpha)
-                            + foreground * alpha
-                            + 127) / 255;
-
-                    pixels.put(
-                            offset + channel,
-                            (byte) blended);
-                }
-            }
+    /** Coordinates are in byte offsets for this specific frame layout. */
+    private record RenderMask(
+            String phrase, int width, int height, int channels, int stride,
+            int[] offsets, int[] argb) {
+        boolean matches(String newPhrase, int newWidth, int newHeight,
+                int newChannels, int newStride) {
+            return phrase.equals(newPhrase) && width == newWidth
+                    && height == newHeight && channels == newChannels
+                    && stride == newStride;
         }
     }
 }
