@@ -73,44 +73,101 @@ public final class SubtitleCoordinator implements AutoCloseable {
         activeTask = executor.submit(() -> runTranscription(media, state, requestGeneration));
     }
 
+    /**
+     * Extracts short audio chunks while two independent HTTP workers transcribe
+     * them. Requests never block the JavaFX thread or the frame pipeline.
+     * The number of outstanding WAV files is bounded by the worker count.
+     * A late response from an old media generation is never published.
+     */
     private void runTranscription(File media, SubtitleState state, long requestGeneration) {
-        List<SubtitleCue> accumulated = new ArrayList<>();
+        final int maxInFlight = 2;
+        final java.util.concurrent.Semaphore available =
+                new java.util.concurrent.Semaphore(maxInFlight);
+        final java.util.concurrent.atomic.AtomicBoolean anyFailure =
+                new java.util.concurrent.atomic.AtomicBoolean();
+        final ExecutorService uploads = Executors.newFixedThreadPool(maxInFlight,
+                runnable -> Thread.ofPlatform()
+                        .name("comp3011-subtitle-http")
+                        .daemon(true)
+                        .unstarted(runnable));
+        final List<Future<?>> requests = new ArrayList<>();
+        final List<SubtitleCue> accumulated = new ArrayList<>();
+
         try {
             extractor.extract(media, chunk -> {
+                // Interruptible backpressure: at most two WAV chunks outstanding.
+                available.acquire();
+                boolean accepted = false;
                 try {
                     if (Thread.currentThread().isInterrupted()) {
-                        throw new InterruptedException("Subtitle task cancelled");
+                        throw new InterruptedException("Subtitle job cancelled");
                     }
-
-                    // Blocking request happens ONLY on the subtitle I/O thread.
-                    String response = cache.lookupOrTranscribe(
-                            chunk.file(), client::transcribe);
-                    List<SubtitleCue> newCues =
-                            SubtitleCueMapper.fromJson(response, chunk.startUs());
-                    accumulated.addAll(newCues);
-                    accumulated.sort(Comparator.comparingLong(SubtitleCue::startUs));
-
-                    // Synchronize publication and cancellation on the same lock.
                     synchronized (this) {
                         if (generation != requestGeneration) {
-                            throw new InterruptedException("Superseded subtitle task");
+                            throw new InterruptedException("Superseded subtitle job");
                         }
-                        state.setCues(accumulated);
                     }
+
+                    Future<?> request = uploads.submit(() -> {
+                        try {
+                            String response = cache.lookupOrTranscribe(
+                                    chunk.file(), client::transcribe);
+                            List<SubtitleCue> received =
+                                    SubtitleCueMapper.fromJson(response, chunk.startUs());
+
+                            // Every HTTP worker publishes a complete, sorted snapshot.
+                            // Out-of-order responses are safe, as are seeks and toggles.
+                            synchronized (this) {
+                                if (generation == requestGeneration) {
+                                    accumulated.addAll(received);
+                                    accumulated.sort(Comparator.comparingLong(
+                                            SubtitleCue::startUs));
+                                    state.setCues(accumulated);
+                                }
+                            }
+                        } catch (InterruptedException cancelled) {
+                            Thread.currentThread().interrupt();
+                        } catch (Exception failure) {
+                            // One failed chunk must not prevent later speech appearing.
+                            anyFailure.set(true);
+                            synchronized (this) {
+                                if (generation == requestGeneration) {
+                                    System.err.println("Subtitle chunk unavailable: "
+                                            + safeMessage(failure));
+                                }
+                            }
+                        } finally {
+                            try {
+                                Files.deleteIfExists(chunk.file());
+                            } catch (IOException ignored) {
+                                // Temporary-file cleanup is best effort.
+                            }
+                            available.release();
+                        }
+                    });
+                    requests.add(request);
+                    accepted = true;
                 } finally {
-                    // Audio data must not persist in temporary files.
-                    Files.deleteIfExists(chunk.file());
+                    if (!accepted) {
+                        // AudioChunkExtractor deletes the unaccepted WAV itself.
+                        available.release();
+                    }
                 }
             });
+
+            // This wait runs ONLY on the dedicated extraction thread.
+            for (Future<?> request : requests) {
+                request.get();
+            }
             synchronized (this) {
                 if (generation == requestGeneration) {
-                    completed = true;
+                    // A retry remains possible after partial network failures.
+                    completed = !anyFailure.get();
                 }
             }
         } catch (InterruptedException cancelled) {
             Thread.currentThread().interrupt();
         } catch (Exception failure) {
-            // The video player keeps running if the network/server is unavailable.
             synchronized (this) {
                 if (generation == requestGeneration) {
                     System.err.println("Subtitles unavailable: "
@@ -118,6 +175,9 @@ public final class SubtitleCoordinator implements AutoCloseable {
                             + safeMessage(failure));
                 }
             }
+        } finally {
+            // Cancels in-flight HTTP calls when the player is stopped/replaced.
+            uploads.shutdownNow();
         }
     }
 

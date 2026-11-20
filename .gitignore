@@ -9,3 +9,6 @@
 
 # Local development helper scripts (not assessed)
 A3_*.sh
+
+# Local playback diagnostic captures
+A3_playback_*.log

@@ -20,7 +20,7 @@ import static org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_PCM_S16LE;
  * Developed with assistance from ChatGPT.
  */
 public final class AudioChunkExtractor {
-    public static final long CHUNK_DURATION_US = 20_000_000L;
+    public static final long CHUNK_DURATION_US = 8_000_000L;
 
     public record Chunk(Path file, long startUs, long durationUs) {
     }
