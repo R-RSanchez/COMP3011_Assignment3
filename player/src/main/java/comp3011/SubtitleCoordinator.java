@@ -24,6 +24,7 @@ public final class SubtitleCoordinator implements AutoCloseable {
 
     private final AudioChunkExtractor extractor;
     private final SubtitleHttpClient client;
+    private final SubtitleCache cache;
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor(
             runnable -> Thread.ofPlatform()
@@ -42,8 +43,14 @@ public final class SubtitleCoordinator implements AutoCloseable {
 
     // Package-private dependency injection allows isolated tests without OpenAI.
     SubtitleCoordinator(AudioChunkExtractor extractor, SubtitleHttpClient client) {
+        this(extractor, client, new SubtitleCache());
+    }
+
+    SubtitleCoordinator(AudioChunkExtractor extractor, SubtitleHttpClient client,
+                        SubtitleCache cache) {
         this.extractor = extractor;
         this.client = client;
+        this.cache = cache;
     }
 
     /**
@@ -76,7 +83,8 @@ public final class SubtitleCoordinator implements AutoCloseable {
                     }
 
                     // Blocking request happens ONLY on the subtitle I/O thread.
-                    String response = client.transcribe(chunk.file());
+                    String response = cache.lookupOrTranscribe(
+                            chunk.file(), client::transcribe);
                     List<SubtitleCue> newCues =
                             SubtitleCueMapper.fromJson(response, chunk.startUs());
                     accumulated.addAll(newCues);

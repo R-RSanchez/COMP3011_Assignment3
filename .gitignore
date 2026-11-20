@@ -6,3 +6,6 @@
 **/.env
 **/key.txt
 **/*.zip
+
+# Local development helper scripts (not assessed)
+A3_*.sh
