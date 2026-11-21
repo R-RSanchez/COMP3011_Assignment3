@@ -16,24 +16,7 @@ public final class SubtitleState {
 
     private volatile boolean enabled;
 
-    /*
-     * Temporary demonstration cues.
-     * The server integration will replace these with Whisper results.
-     */
-    private volatile List<SubtitleCue> cues = List.of(
-            new SubtitleCue(
-                    0,
-                    3_000_000,
-                    "TEST: Subtitles are working."),
-            new SubtitleCue(
-                    4_000_000,
-                    7_000_000,
-                    "Press S to toggle subtitles."),
-            new SubtitleCue(
-                    8_000_000,
-                    11_000_000,
-                    "Next: real speech transcription.")
-    );
+    private volatile List<SubtitleCue> cues = List.of();
 
     public boolean isEnabled() {
         return enabled;
@@ -45,6 +28,11 @@ public final class SubtitleState {
 
     public void setCues(List<SubtitleCue> newCues) {
         this.cues = List.copyOf(Objects.requireNonNull(newCues));
+    }
+
+    /** Immutable snapshot retained while retrying unavailable transcription chunks. */
+    List<SubtitleCue> snapshot() {
+        return cues;
     }
 
     public String textAt(long timestampUs) {

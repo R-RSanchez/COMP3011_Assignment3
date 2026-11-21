@@ -26,7 +26,7 @@ public final class SubtitleCoordinator implements AutoCloseable {
     private final SubtitleHttpClient client;
     private final SubtitleCache cache;
 
-    private final ExecutorService executor = Executors.newSingleThreadExecutor(
+    private final java.util.concurrent.ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(
             runnable -> Thread.ofPlatform()
                     .name("comp3011-subtitle-io")
                     .daemon(true)
@@ -36,6 +36,7 @@ public final class SubtitleCoordinator implements AutoCloseable {
     private File activeMedia;
     private boolean completed;
     private long generation;
+    private long activeStartUs;
 
     public SubtitleCoordinator() {
         this(new AudioChunkExtractor(), new SubtitleHttpClient());
@@ -58,19 +59,29 @@ public final class SubtitleCoordinator implements AutoCloseable {
      * do not resubmit the same file while it is running or already completed.
      */
     public synchronized void startIfNeeded(File media, SubtitleState state) {
+        startIfNeeded(media, state, 0);
+    }
+
+    /** Start from the current position when captions are enabled mid-playback. */
+    public synchronized void startIfNeeded(File media, SubtitleState state, long startUs) {
+        // Decode from a stable origin: arbitrary seeks change chunk PCM and
+        // invalidate exact cache keys. Cached chunks are read without HTTP.
+        startUs = 0;
         if (media == null || executor.isShutdown()) {
             return;
         }
-        if (media.equals(activeMedia) &&
+        if (media.equals(activeMedia) && Math.max(0, startUs) >= activeStartUs &&
                 (completed || (activeTask != null && !activeTask.isDone()))) {
             return;
         }
 
         cancelCurrent();
         activeMedia = media;
+        activeStartUs = Math.max(0, startUs);
         state.setCues(List.of()); // Never show demo cues or prior-media results.
         final long requestGeneration = generation;
-        activeTask = executor.submit(() -> runTranscription(media, state, requestGeneration));
+        activeTask = executor.submit(() -> runTranscription(
+                media, state, requestGeneration, 0));
     }
 
     /**
@@ -79,7 +90,7 @@ public final class SubtitleCoordinator implements AutoCloseable {
      * The number of outstanding WAV files is bounded by the worker count.
      * A late response from an old media generation is never published.
      */
-    private void runTranscription(File media, SubtitleState state, long requestGeneration) {
+    private void runTranscription(File media, SubtitleState state, long requestGeneration, long startUs) {
         final int maxInFlight = 2;
         final java.util.concurrent.Semaphore available =
                 new java.util.concurrent.Semaphore(maxInFlight);
@@ -91,10 +102,12 @@ public final class SubtitleCoordinator implements AutoCloseable {
                         .daemon(true)
                         .unstarted(runnable));
         final List<Future<?>> requests = new ArrayList<>();
-        final List<SubtitleCue> accumulated = new ArrayList<>();
+        final List<SubtitleCue> accumulated = new ArrayList<>(state.snapshot());
+        if (Boolean.getBoolean("comp3011.playback.diagnostics")) System.out.printf("[A3-SUBTITLES] TRANSCRIPTION_START media=%s%n",
+                media.getName());
 
         try {
-            extractor.extract(media, chunk -> {
+            extractor.extract(media, startUs, chunk -> {
                 // Interruptible backpressure: at most two WAV chunks outstanding.
                 available.acquire();
                 boolean accepted = false;
@@ -109,6 +122,7 @@ public final class SubtitleCoordinator implements AutoCloseable {
                     }
 
                     Future<?> request = uploads.submit(() -> {
+                        final long startedNs = System.nanoTime();
                         try {
                             String response = cache.lookupOrTranscribe(
                                     chunk.file(), client::transcribe);
@@ -119,10 +133,33 @@ public final class SubtitleCoordinator implements AutoCloseable {
                             // Out-of-order responses are safe, as are seeks and toggles.
                             synchronized (this) {
                                 if (generation == requestGeneration) {
+                                    accumulated.removeAll(received);
                                     accumulated.addAll(received);
                                     accumulated.sort(Comparator.comparingLong(
                                             SubtitleCue::startUs));
                                     state.setCues(accumulated);
+                                    if (Boolean.getBoolean("comp3011.playback.diagnostics")) {
+                                    // Number and timing of cues, not text or API data.
+                                    int receivedCount = received.size();
+                                    long earliestUs = received.stream()
+                                            .mapToLong(SubtitleCue::startUs)
+                                            .min().orElse(-1L);
+                                    long latestUs = received.stream()
+                                            .mapToLong(SubtitleCue::endUs)
+                                            .max().orElse(-1L);
+                                    System.out.printf("[A3-SUBTITLES] CUES "
+                                                    + "chunk_ms=%d response_ms=%d "
+                                                    + "received=%d total=%d first_ms=%d "
+                                                    + "last_ms=%d cover28=%b cover32=%b "
+                                                    + "cover35=%b%n",
+                                            chunk.startUs() / 1_000,
+                                            (System.nanoTime() - startedNs) / 1_000_000,
+                                            receivedCount, accumulated.size(),
+                                            earliestUs / 1_000, latestUs / 1_000,
+                                            state.textAt(28_000_000L) != null,
+                                            state.textAt(32_000_000L) != null,
+                                            state.textAt(35_000_000L) != null);
+                                    }
                                 }
                             }
                         } catch (InterruptedException cancelled) {
@@ -178,6 +215,16 @@ public final class SubtitleCoordinator implements AutoCloseable {
         } finally {
             // Cancels in-flight HTTP calls when the player is stopped/replaced.
             uploads.shutdownNow();
+            synchronized (this) {
+                if (generation == requestGeneration && anyFailure.get()
+                        && !executor.isShutdown()) {
+                    // Retry failed chunks after an outage; successful chunks come
+                    // from disk cache. Keep already-visible cues during recovery.
+                    activeTask = executor.schedule(
+                            () -> runTranscription(media, state, requestGeneration, startUs),
+                            2, java.util.concurrent.TimeUnit.SECONDS);
+                }
+            }
         }
     }
 

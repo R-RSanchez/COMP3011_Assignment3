@@ -49,9 +49,26 @@ class SubtitleIntegrationComponentsTest {
     void noisySegmentDoesNotGenerateSubtitle() {
         String json = """
                 {"segments":[{"start":0,"end":2,"text":"Noise",
-                  "no_speech_prob":0.98,"avg_logprob":-0.2}]}
+                  "no_speech_prob":0.98,"avg_logprob":-1.1}]}
                 """;
         assertTrue(SubtitleCueMapper.fromJson(json, 0).isEmpty());
+    }
+
+    @Test
+    void confidenceFilterPreservesSpeechUnlessBothStrictThresholdsAreExceeded() {
+        double[][] retained = {{0.98, -0.2}, {0.1, -1.5}, {0.6, -1.5}, {0.9, -1.0}};
+        for (double[] scores : retained) {
+            String json = "{\"segments\":[{\"start\":1,\"end\":3,\"text\":\"Real dialogue\","
+                    + "\"no_speech_prob\":" + scores[0] + ",\"avg_logprob\":" + scores[1] + "}]}";
+            var cues = SubtitleCueMapper.fromJson(json, 24_000_000);
+            assertEquals(1, cues.size(), json);
+            assertEquals(25_000_000, cues.getFirst().startUs());
+            assertEquals("Real dialogue", cues.getFirst().text());
+        }
+        assertTrue(SubtitleCueMapper.fromJson("""
+                {"segments":[{"start":1,"end":3,"text":"Noise",
+                "no_speech_prob":0.61,"avg_logprob":-1.01}]}
+                """, 0).isEmpty());
     }
 
     @Test

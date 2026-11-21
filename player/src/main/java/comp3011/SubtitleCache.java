@@ -52,11 +52,13 @@ public final class SubtitleCache {
 
         String digest = sha256(wav);
         Path cached = directory.resolve(digest + ".json");
+        SubtitleExcerptCache excerpts = new SubtitleExcerptCache(directory);
 
         try {
             if (Files.isRegularFile(cached)) {
                 String value = Files.readString(cached, StandardCharsets.UTF_8);
                 if (isValidTranscript(value)) {
+                    try { excerpts.remember(wav, digest); } catch (IOException ignored) { }
                     return value;
                 }
                 Files.deleteIfExists(cached);
@@ -70,7 +72,9 @@ public final class SubtitleCache {
         }
 
         // The network call is made by SubtitleCoordinator's dedicated worker.
-        String result = source.load(wav);
+        String result = null;
+        try { result = excerpts.find(wav); } catch (IOException | RuntimeException ignored) { }
+        if (result == null) result = source.load(wav);
         if (!isValidTranscript(result)) {
             throw new IOException("Subtitle server returned invalid timed JSON");
         }
@@ -91,6 +95,7 @@ public final class SubtitleCache {
             } catch (AtomicMoveNotSupportedException unavailable) {
                 Files.move(temporary, cached, StandardCopyOption.REPLACE_EXISTING);
             }
+            excerpts.remember(wav, digest);
         } catch (IOException ignored) {
             // Successful transcript must still be used when disk caching fails.
         } finally {

@@ -12,3 +12,10 @@ A3_*.sh
 
 # Local playback diagnostic captures
 A3_playback_*.log
+
+# Local credentials and diagnostic fixtures
+key.v3/
+A3_code_review.txt
+A3_server_response.json
+whisper_result.json
+whisper_test.wav

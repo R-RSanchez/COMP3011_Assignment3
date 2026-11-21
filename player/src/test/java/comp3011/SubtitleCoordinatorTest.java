@@ -85,4 +85,68 @@ class SubtitleCoordinatorTest {
         }
         return media;
     }
+
+    @Test
+    void recoversAutomaticallyAfterServerOutage() throws Exception {
+        AtomicInteger requests = new AtomicInteger();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/api/v1/subtitles", exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            boolean recovered = requests.incrementAndGet() > 1;
+            byte[] body = """
+                    {"segments":[{"start":0,"end":1,"text":"Recovered"}]}
+                    """.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(recovered ? 200 : 503, body.length);
+            try (var out = exchange.getResponseBody()) { out.write(body); }
+        });
+        server.start();
+        try (var coordinator = new SubtitleCoordinator(new AudioChunkExtractor(),
+                new SubtitleHttpClient(URI.create("http://127.0.0.1:"
+                        + server.getAddress().getPort() + "/api/v1/subtitles")),
+                new SubtitleCache(temporary.resolve("recovery-cache")))) {
+            SubtitleState state = new SubtitleState();
+            state.setEnabled(true);
+            coordinator.startIfNeeded(makeWav().toFile(), state);
+            long deadline = System.nanoTime() + 12_000_000_000L;
+            while (!"Recovered".equals(state.textAt(300_000))
+                    && System.nanoTime() < deadline) { Thread.sleep(25); }
+            assertEquals("Recovered", state.textAt(300_000));
+            assertEquals(2, requests.get());
+            assertEquals(1, state.snapshot().size());
+        } finally { server.stop(0); }
+    }
+
+    @Test
+    void seekingBeforeInitialSubtitlePositionTranscribesEarlierAudio() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/api/v1/subtitles", exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            byte[] body = "{\"segments\":[{\"start\":0,\"end\":1,\"text\":\"Speech\"}]}"
+                    .getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            try (var out = exchange.getResponseBody()) { out.write(body); }
+        });
+        server.start();
+        try (var coordinator = new SubtitleCoordinator(new AudioChunkExtractor(),
+                new SubtitleHttpClient(URI.create("http://127.0.0.1:"
+                        + server.getAddress().getPort() + "/api/v1/subtitles")),
+                new SubtitleCache(temporary.resolve("seek-cache")))) {
+            var media = makeWav().toFile();
+            SubtitleState state = new SubtitleState();
+            state.setEnabled(true);
+            coordinator.startIfNeeded(media, state, 500_000);
+            long deadline = System.nanoTime() + 10_000_000_000L;
+            while (state.textAt(800_000) == null && System.nanoTime() < deadline) {
+                Thread.sleep(25);
+            }
+            assertEquals("Speech", state.textAt(800_000));
+            assertEquals("Speech", state.textAt(100_000));
+            coordinator.startIfNeeded(media, state, 0);
+            deadline = System.nanoTime() + 10_000_000_000L;
+            while (state.textAt(100_000) == null && System.nanoTime() < deadline) {
+                Thread.sleep(25);
+            }
+            assertEquals("Speech", state.textAt(100_000));
+        } finally { server.stop(0); }
+    }
 }

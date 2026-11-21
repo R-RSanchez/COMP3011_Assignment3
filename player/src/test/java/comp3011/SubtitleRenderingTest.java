@@ -15,10 +15,25 @@ import org.junit.jupiter.api.Test;
  * Developed with assistance from ChatGPT.
  */
 class SubtitleRenderingTest {
+    private static SubtitleState fixtureState() {
+        SubtitleState state = new SubtitleState();
+        state.setCues(List.of(
+                new SubtitleCue(0, 3_000_000, "TEST: Subtitles are working."),
+                new SubtitleCue(4_000_000, 7_000_000, "Press S to toggle subtitles.")));
+        return state;
+    }
+
+    @Test
+    void productionStateStartsWithoutInventedSubtitles() {
+        SubtitleState state = new SubtitleState();
+        state.setEnabled(true);
+        assertNull(state.textAt(1_000_000));
+        assertTrue(state.snapshot().isEmpty());
+    }
 
     @Test
     void selectsSubtitleByMediaTimestamp() {
-        SubtitleState state = new SubtitleState();
+        SubtitleState state = fixtureState();
         state.setEnabled(true);
 
         assertEquals(
@@ -34,7 +49,7 @@ class SubtitleRenderingTest {
 
     @Test
     void disablingSubtitlesHidesText() {
-        SubtitleState state = new SubtitleState();
+        SubtitleState state = fixtureState();
 
         assertNull(state.textAt(1_000_000));
 
@@ -47,7 +62,7 @@ class SubtitleRenderingTest {
 
     @Test
     void supportsReplacingDemonstrationCues() {
-        SubtitleState state = new SubtitleState();
+        SubtitleState state = fixtureState();
 
         state.setCues(List.of(
                 new SubtitleCue(
@@ -75,7 +90,7 @@ class SubtitleRenderingTest {
             pixels.put(i, (byte) 0);
         }
 
-        SubtitleState state = new SubtitleState();
+        SubtitleState state = fixtureState();
 
         FrameSubtitler processor = new FrameSubtitler(state);
 

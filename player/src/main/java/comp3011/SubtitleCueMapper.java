@@ -29,8 +29,9 @@ public final class SubtitleCueMapper {
         if (segments != null) {
             for (JsonElement element : segments) {
                 JsonObject segment = element.getAsJsonObject();
-                if (number(segment, "no_speech_prob", 0) > 0.7
-                        || number(segment, "avg_logprob", 0) < -1.2) {
+                // A3 excludes a segment only when BOTH confidence conditions hold.
+                if (number(segment, "no_speech_prob", 0) > 0.6
+                        && number(segment, "avg_logprob", 0) < -1.0) {
                     continue;
                 }
 

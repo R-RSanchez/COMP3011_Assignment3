@@ -108,13 +108,20 @@ public class VideoPlayerModel {
 
     private final SubtitleCoordinator subtitleCoordinator = new SubtitleCoordinator();
 
+    // Optional playback completion counters.
+    private long titanAuditStartNs;
+    private long titanAuditLastReportNs;
+    private int titanAuditShown;
+    private int titanAuditLastFrame = -1;
+    private long titanAuditLastTimestampUs;
+
     private boolean audioAvailable;
 
     private boolean frameProcessorsInitialised;
 
     private boolean endOfInput;
 
-    // Step 11: enabled only with -Dcomp3011.playback.diagnostics=true.
+    // Enabled only with -Dcomp3011.playback.diagnostics=true.
     // No additional work occurs on normal TITAN / player runs.
     private static final boolean PLAYBACK_DIAGNOSTICS =
             Boolean.getBoolean("comp3011.playback.diagnostics");
@@ -295,7 +302,11 @@ public class VideoPlayerModel {
         subtitleOutputEnabled = !subtitleOutputEnabled;
         subtitleState.setEnabled(subtitleOutputEnabled);
         if (subtitleOutputEnabled && videoFile != null) {
-            subtitleCoordinator.startIfNeeded(videoFile, subtitleState);
+            // Prioritize speech close to the frame currently on screen.
+            // The two-second overlap helps preserve sentences at the toggle.
+            long subtitleStartUs = Math.max(0, currentTimestampUs - 2_000_000L);
+            subtitleCoordinator.startIfNeeded(
+                    videoFile, subtitleState, subtitleStartUs);
         }
     }
 
@@ -318,6 +329,7 @@ public class VideoPlayerModel {
 
     public void stopPlayback() {
 
+        titanAuditReport("STOP");
         subtitleCoordinator.cancel();
         subtitleState.setCues(List.of());
         closePlaybackResources();
@@ -336,6 +348,7 @@ public class VideoPlayerModel {
 
     public void shutdown() {
 
+        titanAuditReport("SHUTDOWN");
         subtitleCoordinator.close();
         closePlaybackResources();
     }
@@ -368,6 +381,11 @@ public class VideoPlayerModel {
         long grabTimestampUs =
                 displayableSeekTimestamp(
                         logicalTimestampUs);
+
+        if (subtitleOutputEnabled && videoFile != null) {
+            subtitleCoordinator.startIfNeeded(videoFile, subtitleState,
+                    Math.max(0, logicalTimestampUs - 2_000_000L));
+        }
 
         if (!playbackOpen) {
 
@@ -538,6 +556,18 @@ public class VideoPlayerModel {
                     frameProcessors.size(), logicalTimestampUs / 1000);
         }
 
+        // Reset completion counters; output requires playback diagnostics.
+        titanAuditStartNs = System.nanoTime();
+        titanAuditLastReportNs = titanAuditStartNs;
+        titanAuditShown = 0;
+        titanAuditLastFrame = -1;
+        titanAuditLastTimestampUs = 0;
+        if (PLAYBACK_DIAGNOSTICS) System.out.printf("[A3-PLAYBACK] START video=%s expected_frames=%d "
+                        + "duration_ms=%d fps=%.3f stages=%d%n",
+                videoFile == null ? "(none)" : videoFile.getName(),
+                totalVideoFrames, videoDurationUs / 1_000,
+                frameRate, frameProcessors.size());
+
         pendingAudio.clear();
 
         preparedFrame = null;
@@ -634,6 +664,7 @@ public class VideoPlayerModel {
 
                     endOfInput = true;
                     reportPlaybackDiagnostics("EOF_DECODER");
+                    titanAuditReport("EOF_DECODER");
                     return false;
                 }
 
@@ -759,9 +790,11 @@ public class VideoPlayerModel {
                             + relativeTimestampUs
                                     * 1_000L;
 
-            Image image =
-                    converter.convert(
-                            processed.frame());
+            Image image;
+            // Conversion copies pixels into JavaFX; release the owned native clone.
+            try (Frame ownedFrame = processed.frame()) {
+                image = converter.convert(ownedFrame);
+            }
 
             preparedFrame =
                     new PreparedFrame(
@@ -903,6 +936,14 @@ public class VideoPlayerModel {
         currentTimestampUs =
                 frame.logicalTimestampUs();
 
+        titanAuditShown++;
+        titanAuditLastFrame = frame.frameNumber();
+        titanAuditLastTimestampUs = frame.mediaTimestampUs();
+        if (now - titanAuditLastReportNs >= 10_000_000_000L) {
+            titanAuditLastReportNs = now;
+            titanAuditReport("PROGRESS");
+        }
+
         if (PLAYBACK_DIAGNOSTICS) {
             diagnosticShownFrames++;
             diagnosticLastFrameNumber = frame.frameNumber();
@@ -943,6 +984,25 @@ public class VideoPlayerModel {
 
         notifyFrameReady(
                 frame.image());
+    }
+
+    // Optional numeric completion metadata, never audio or transcript text.
+    private void titanAuditReport(String event) {
+        if (!PLAYBACK_DIAGNOSTICS || titanAuditStartNs == 0) {
+            return;
+        }
+        long wallMs = (System.nanoTime() - titanAuditStartNs) / 1_000_000;
+        long mediaMs = titanAuditLastTimestampUs / 1_000;
+        System.out.printf("[A3-PLAYBACK] %s wall_ms=%d media_ms=%d "
+                        + "last_frame=%d expected_frames=%d shown=%d eof=%b "
+                        + "subtitle_enabled=%b cue_at_28s=%b cue_at_32s=%b "
+                        + "cue_at_35s=%b%n",
+                event, wallMs, mediaMs, titanAuditLastFrame,
+                totalVideoFrames, titanAuditShown, endOfInput,
+                subtitleState.isEnabled(),
+                subtitleState.textAt(28_000_000L) != null,
+                subtitleState.textAt(32_000_000L) != null,
+                subtitleState.textAt(35_000_000L) != null);
     }
 
     /** Optional progress report, deliberately silent in normal operation. */
@@ -1042,6 +1102,7 @@ public class VideoPlayerModel {
 
     private void finishPlayback() {
 
+        titanAuditReport("FINISHED");
         reportPlaybackDiagnostics("FINISHED");
 
         long endTimestampUs =
@@ -1069,6 +1130,7 @@ public class VideoPlayerModel {
     private void handlePlaybackError(
             Exception e) {
 
+        titanAuditReport("ERROR");
         reportPlaybackDiagnostics("ERROR");
         e.printStackTrace();
 
