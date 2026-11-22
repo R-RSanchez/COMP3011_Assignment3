@@ -250,7 +250,7 @@ The following original functionality was manually checked after introducing conc
 
 The intention of the concurrent architecture is to improve frame-processing throughput without changing the externally visible behaviour of the supplied player.
 
-## Generative AI Attribution
+## Attribution
 
 ChatGPT was used as a development assistant during this assignment for discussion of architecture, concurrency, debugging, testing and documentation.
 

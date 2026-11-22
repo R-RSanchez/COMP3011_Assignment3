@@ -460,7 +460,7 @@ The Cloud API call is intentionally not synchronized, as this would serialize re
 
 ---
 
-## External Resources and Generative AI
+## External Resources
 
 External documentation and generative AI tools were used during development for research, debugging, design discussion, testing ideas, and understanding Spring Boot APIs.
 
