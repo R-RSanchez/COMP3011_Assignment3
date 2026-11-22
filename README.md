@@ -31,4 +31,4 @@ The TITAN ZIP has player pom.xml and src/ plus the freshly built Spring Boot JAR
 
 ## Attribution
 
-Author: Raúl Ruiz Sánchez. Adapted from the supplied COMP3011 starter code and earlier assignments. Development, debugging and testing were assisted by ChatGPT/Codex; contributions are acknowledged in source headers. The author must be able to explain and defend the implementation.
+Author: Raúl Ruiz Sánchez. Adapted from the supplied COMP3011 starter code and earlier assignments. Development, debugging and testing were assisted by ChatGPT/Codex; contributions are acknowledged in source headers.

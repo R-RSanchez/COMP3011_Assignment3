@@ -256,6 +256,4 @@ ChatGPT was used as a development assistant during this assignment for discussio
 
 AI-generated suggestions were reviewed, adapted and tested during development.
 
-Modified and newly created source files include student attribution and acknowledge AI assistance where appropriate.
-
 For more information on this code and how to get started, see https://learn.adelaide.edu.au/courses/30747/assignments/94505
